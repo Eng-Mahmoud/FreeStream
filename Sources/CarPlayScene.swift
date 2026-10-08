@@ -39,7 +39,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             .dropFirst().sink { [weak self] _, _ in self?.showRoot() }.store(in: &subscriptions)
     }
     func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
-                                  didDisconnect interfaceController: CPInterfaceController) {
+                                  didDisconnectInterfaceController interfaceController: CPInterfaceController) {
         subscriptions.removeAll(); controller = nil; session = nil; searchEntries = []
         StreamLibrary.shared.carStatus = "CarPlay disconnected."
         // Playback belongs to the app, not to the lifetime of either screen.

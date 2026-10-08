@@ -171,7 +171,7 @@ struct MediaCard: View {
 struct SeriesView: View {
     let series: Series
     @State private var episodes: [Channel] = []
-    @State private var error = ""
+    @State private var episodeMessage = ""
     @State private var loading = true
     @State private var search = ""
     @State private var selected: Channel?
@@ -180,7 +180,7 @@ struct SeriesView: View {
         NavigationStack {
             List {
                 if loading { ProgressView("Loading episodes") }
-                if !error.isEmpty { Text(error).foregroundStyle(.orange) }
+                if !episodeMessage.isEmpty { Text(episodeMessage).foregroundStyle(.orange) }
                 ForEach(episodes.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.group.localizedCaseInsensitiveContains(search) }) { episode in
                     Button { Playback.shared.open(episode); selected = episode } label: {
                         VStack(alignment: .leading) { Text(episode.name); Text(episode.group).font(.caption).foregroundStyle(.secondary) }
@@ -189,8 +189,8 @@ struct SeriesView: View {
             }.navigationTitle(series.name).searchable(text: $search, prompt: "Search episodes or seasons")
                 .toolbar { Button("Done") { dismiss() } }
                 .task {
-                    do { episodes = try await Catalog.episodes(series); if episodes.isEmpty { error = "No episodes returned." } }
-                    catch { error = "Could not load episodes. Check provider and connection." }
+                    do { episodes = try await Catalog.episodes(series); if episodes.isEmpty { episodeMessage = "No episodes returned." } }
+                    catch { episodeMessage = "Could not load episodes. Check provider and connection." }
                     loading = false
                 }
                 .sheet(item: $selected) { PlaybackView(channel: $0) }
