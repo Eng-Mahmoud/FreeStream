@@ -1,0 +1,26 @@
+name: Build iPhone prototype
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install project generator
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build unsigned device app
+        run: xcodebuild -project FreeStream.xcodeproj -scheme FreeStream -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+      - name: Package for local signing
+        run: |
+          mkdir -p package/Payload
+          cp -R build/Build/Products/Release-iphoneos/FreeStream.app package/Payload/
+          cd package
+          zip -qr ../FreeStream-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FreeStream-unsigned
+          path: FreeStream-unsigned.ipa
