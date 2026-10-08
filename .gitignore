@@ -1,0 +1,6 @@
+build/
+package/
+Generated/
+*.xcodeproj/
+*.ipa
+.DS_Store
