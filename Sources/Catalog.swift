@@ -39,12 +39,13 @@ enum CatalogError: LocalizedError {
     }
 }
 
-struct Channel: Identifiable {
+struct Channel: Identifiable, Codable {
     var id: String
     var name: String
     var group: String
     var url: URL
     var live: Bool
+    var artwork: URL? = nil
 }
 
 enum Catalog {
@@ -66,13 +67,15 @@ enum Catalog {
         guard let root = try JSONSerialization.jsonObject(with: loginData) as? [String: Any],
               let user = root["user_info"] as? [String: Any], scalar(user["auth"]) == "1",
               scalar(user["status"])?.lowercased() == "active" else { throw CatalogError.rejected }
+        async let categories = categoryNames(c, action: movie ? "get_vod_categories" : "get_live_categories")
         let data = try await fetch(c.apiURL(action: movie ? "get_vod_streams" : "get_live_streams"))
         guard let rows = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { throw CatalogError.malformed }
+        let names = (try? await categories) ?? [:]
         return try rows.compactMap { row in
             guard let id = scalar(row["stream_id"]), let name = row["name"] as? String else { return nil }
             let ext = movie ? (scalar(row["container_extension"]) ?? "mp4") : (hls ? "m3u8" : "ts")
             return Channel(id: "\(movie ? "vod" : "live"):\(id)", name: name,
-                           group: scalar(row["category_id"]) ?? "", url: try c.streamURL(id: id, movie: movie, ext: ext), live: !movie)
+                           group: names[scalar(row["category_id"]) ?? ""] ?? scalar(row["category_id"]) ?? "", url: try c.streamURL(id: id, movie: movie, ext: ext), live: !movie, artwork: scalar(row["stream_icon"]).flatMap(URL.init(string:)))
         }
     }
     static func m3u(_ text: String, base: URL) -> [Channel] {
@@ -122,4 +125,79 @@ enum Vault {
     static func clear() {
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
     }
+}
+
+struct Series: Identifiable, Codable {
+    let id: String
+    let name: String
+    let group: String
+    let credentials: Credentials
+    var artwork: URL? = nil
+}
+
+extension Catalog {
+    static func categoryNames(_ credentials: Credentials, action: String) async throws -> [String: String] {
+        let data = try await fetch(credentials.apiURL(action: action))
+        guard let rows = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { throw CatalogError.malformed }
+        var result: [String: String] = [:]
+        for row in rows {
+            if let id = scalar(row["category_id"]), let name = scalar(row["category_name"]) { result[id] = name }
+        }
+        return result
+    }
+    static func series(_ credentials: Credentials) async throws -> [Series] {
+        async let categories = categoryNames(credentials, action: "get_series_categories")
+        let data = try await fetch(credentials.apiURL(action: "get_series"))
+        guard let rows = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { throw CatalogError.malformed }
+        let names = (try? await categories) ?? [:]
+        return rows.compactMap { row in
+            guard let id = scalar(row["series_id"]), let name = row["name"] as? String else { return nil }
+            return Series(id: id, name: name, group: names[scalar(row["category_id"]) ?? ""] ?? scalar(row["category_id"]) ?? "", credentials: credentials, artwork: scalar(row["cover"]).flatMap(URL.init(string:)))
+        }
+    }
+    static func episodes(_ series: Series) async throws -> [Channel] {
+        var components = URLComponents(url: try series.credentials.apiURL(action: "get_series_info"), resolvingAgainstBaseURL: false)!
+        components.queryItems?.append(URLQueryItem(name: "series_id", value: series.id))
+        guard let url = components.url else { throw CatalogError.invalidURL }
+        let data = try await fetch(url)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let seasons = root["episodes"] as? [String: [[String: Any]]] else { throw CatalogError.malformed }
+        var result: [Channel] = []
+        for season in seasons.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
+            for row in (seasons[season] ?? []).sorted(by: { (Int(scalar($0["episode_num"]) ?? "0") ?? 0) < (Int(scalar($1["episode_num"]) ?? "0") ?? 0) }) {
+                guard let id = scalar(row["id"]) else { continue }
+                let ext = scalar(row["container_extension"]) ?? "mp4"
+                let stream = try series.credentials.baseURL().appendingPathComponent("series")
+                    .appendingPathComponent(series.credentials.username).appendingPathComponent(series.credentials.password)
+                    .appendingPathComponent("\(id).\(ext)")
+                result.append(Channel(id: "episode:\(id)", name: scalar(row["title"]) ?? "Episode \(scalar(row["episode_num"]) ?? id)",
+                                      group: "\(series.name) • Season \(season)", url: stream, live: false))
+            }
+        }
+        return result
+    }
+}
+
+// Stream URLs contain provider secrets, so saved catalogs use Keychain, not a plain file.
+enum SecureStore {
+    private static func key(_ account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "FreeStream.catalog", kSecAttrAccount as String: account]
+    }
+    static func read(account: String) -> Data? {
+        var query = key(account); query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? Data
+    }
+    @discardableResult static func write(_ data: Data, account: String) -> Bool {
+        let query = key(account)
+        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query; item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+        }
+        return status == errSecSuccess
+    }
+    static func delete(account: String) { SecItemDelete(key(account) as CFDictionary) }
 }

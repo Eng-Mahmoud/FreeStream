@@ -1,112 +1,253 @@
 import SwiftUI
 import AVKit
+import MediaPlayer
 
 @main
 struct FreeStreamApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     var body: some Scene { WindowGroup { HomeView().preferredColorScheme(.dark) } }
 }
 
 struct HomeView: View {
+    @StateObject private var library = StreamLibrary.shared
+    @ObservedObject private var playback = Playback.shared
     @State private var credentials = Vault.load()
     @State private var source = 0
-    @State private var movies = false
     @State private var hls = true
     @State private var playlist = ""
-    @State private var items: [Channel] = []
     @State private var search = ""
+    @State private var filter = "All"
     @State private var busy = false
     @State private var message = ""
+    @State private var settings = false
     @State private var selected: Channel?
+    @State private var selectedSeries: Series?
     @State private var remember = false
-    var visible: [Channel] { items.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.group.localizedCaseInsensitiveContains(search) } }
+    private let columns = [GridItem(.adaptive(minimum: 150), spacing: 14)]
+    private func matches(_ name: String, _ group: String) -> Bool {
+        search.isEmpty || name.localizedCaseInsensitiveContains(search) || group.localizedCaseInsensitiveContains(search)
+    }
+    private var channels: [Channel] {
+        library.items.filter { matches($0.name, $0.group) && (filter == "All" || (filter == "Live" && $0.live) || (filter == "Movies" && !$0.live)) }
+    }
+    private var shows: [Series] {
+        library.series.filter { (filter == "All" || filter == "Series") && matches($0.name, $0.group) }
+    }
     var body: some View {
         NavigationStack {
-            List {
-                Section("Source") {
-                    Picker("Type", selection: $source) {
-                        Text("Xtream").tag(0)
-                        Text("M3U URL").tag(1)
-                    }.pickerStyle(.segmented)
-                    if source == 0 {
-                        TextField("Server URL, including port", text: $credentials.server)
-                            .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                        TextField("Username", text: $credentials.username)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        SecureField("Password", text: $credentials.password)
-                        Toggle("Movies instead of live channels", isOn: $movies)
-                        if !movies { Toggle("Use HLS (.m3u8)", isOn: $hls) }
-                        Toggle("Remember credentials in Keychain", isOn: $remember)
-                    } else {
-                        SecureField("Provider M3U playlist URL", text: $playlist)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text("Your entertainment").font(.largeTitle.bold())
+                            Text("Live TV, movies and series in one place").foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if busy { ProgressView() }
                     }
-                    Button(busy ? "Loading…" : "Load catalog") { Task { await load() } }
-                        .disabled(busy)
-                    Button("Forget saved login", role: .destructive) {
-                        Vault.clear(); credentials = Credentials(); items = []; remember = false
-                    }.disabled(busy)
-                    if !message.isEmpty { Text(message).font(.footnote).foregroundStyle(.orange) }
-                }
-                Section("\(visible.count) items") {
-                    ForEach(visible) { item in
-                        Button { selected = item } label: {
-                            HStack {
-                                Image(systemName: item.live ? "tv" : "film").foregroundStyle(.cyan)
-                                VStack(alignment: .leading) {
-                                    Text(item.name).foregroundStyle(.primary)
-                                    if !item.group.isEmpty { Text(item.group).font(.caption).foregroundStyle(.secondary) }
-                                }
-                                Spacer()
-                                Image(systemName: "play.circle.fill").foregroundStyle(.cyan)
-                            }
+                    Picker("Content", selection: $filter) {
+                        ForEach(["All", "Live", "Movies", "Series"], id: \.self) { Text($0).tag($0) }
+                    }.pickerStyle(.segmented)
+                    if !message.isEmpty { Text(message).foregroundStyle(.orange).font(.footnote) }
+                    if library.items.isEmpty && library.series.isEmpty {
+                        ContentUnavailableView("Add your media source", systemImage: "play.rectangle", description: Text("Open Sources to load live channels, movies and series."))
+                        Button("Sources") { settings = true }.buttonStyle(.borderedProminent)
+                    }
+                    Text("\(channels.count + shows.count) results").font(.caption).foregroundStyle(.secondary)
+                    LazyVGrid(columns: columns, spacing: 14) {
+                        ForEach(channels) { item in
+                            Button { playback.open(item); selected = item } label: {
+                                MediaCard(name: item.name, subtitle: item.group, kind: item.live ? "LIVE" : "MOVIE", symbol: item.live ? "tv" : "film", artwork: item.artwork)
+                            }.buttonStyle(.plain)
+                        }
+                        ForEach(shows) { show in
+                            Button { selectedSeries = show } label: {
+                                MediaCard(name: show.name, subtitle: show.group, kind: "SERIES", symbol: "rectangle.stack", artwork: show.artwork)
+                            }.buttonStyle(.plain)
                         }
                     }
-                }
-                Section {
-                    Text("Prototype 0.1 • Native iPhone playback and AirPlay. No native CarPlay app icon or full-screen mirroring. Test car video only while parked. Series, EPG and favorites are planned.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                    Text(library.carStatus).font(.footnote).foregroundStyle(.secondary)
+                }.padding()
+            }
+            .background(Color(red: 0.035, green: 0.045, blue: 0.075))
+            .navigationTitle("MahmoudTV")
+            .searchable(text: $search, prompt: "Search live TV, movies and series")
+            .toolbar { Button { settings = true } label: { Image(systemName: "slider.horizontal.3") } }
+            .safeAreaInset(edge: .bottom) {
+                if let current = playback.channel {
+                    HStack {
+                        Button { selected = current } label: {
+                            VStack(alignment: .leading) { Text(current.name).lineLimit(1); Text(playback.state).font(.caption) }
+                        }
+                        Spacer()
+                        Button { if playback.player.rate == 0 { playback.player.play() } else { playback.player.pause() } } label: { Image(systemName: playback.player.rate == 0 ? "play.fill" : "pause.fill") }
+                        Button { playback.stop() } label: { Image(systemName: "stop.fill") }
+                    }.padding().background(.ultraThinMaterial)
                 }
             }
-            .navigationTitle("FreeStream")
-            .searchable(text: $search, prompt: "Search names or groups")
-            .sheet(item: $selected) { item in PlaybackView(channel: item) }
-        }
+            .sheet(isPresented: $settings) {
+                NavigationStack {
+                    Form {
+                        Section("Source") {
+                            Picker("Type", selection: $source) { Text("Xtream").tag(0); Text("M3U URL").tag(1) }.pickerStyle(.segmented)
+                            if source == 0 {
+                                TextField("Server URL, including port", text: $credentials.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                                TextField("Username", text: $credentials.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                                SecureField("Password", text: $credentials.password)
+                                Toggle("Use HLS for live TV", isOn: $hls)
+                                Toggle("Remember login in Keychain", isOn: $remember)
+                            } else {
+                                SecureField("M3U playlist URL", text: $playlist).textInputAutocapitalization(.never).autocorrectionDisabled()
+                            }
+                            Button(busy ? "Loading…" : "Load all content") { Task { await load() } }.disabled(busy)
+                            if !message.isEmpty { Text(message).font(.footnote).foregroundStyle(.orange) }
+                        }
+                        Section("CarPlay") {
+                            Toggle("Save catalog for access from car", isOn: $library.rememberCatalog)
+                            Text(library.carStatus).font(.footnote)
+                            Text("Saved catalogs include stream credentials and are stored in this device’s Keychain. Series episode lists require a network connection. Video availability is controlled by CarPlay.").font(.footnote)
+                        }
+                        Section {
+                            Button("Forget login and catalog", role: .destructive) { Vault.clear(); library.clear(); credentials = Credentials(); remember = false; playback.stop() }.disabled(busy)
+                        }
+                    }.navigationTitle("Sources").toolbar { Button("Done") { settings = false } }
+                }
+            }
+            .sheet(item: $selected) { PlaybackView(channel: $0) }
+            .sheet(item: $selectedSeries) { SeriesView(series: $0) }
+        }.tint(.cyan)
     }
     @MainActor private func load() async {
-        busy = true; message = ""; items = []
+        busy = true; message = ""
         defer { busy = false }
         do {
             if source == 0 {
-                items = try await Catalog.xtream(credentials, movie: movies, hls: hls)
-                if remember { try Vault.save(credentials) }
-                else { Vault.clear() }
+                // Each catalog can fail independently; keep the successful content types.
+                var loaded: [Channel] = []; var shows: [Series] = []; var missing: [String] = []
+                async let live = Catalog.xtream(credentials, movie: false, hls: hls)
+                async let movies = Catalog.xtream(credentials, movie: true, hls: hls)
+                async let series = Catalog.series(credentials)
+                do { loaded += try await live } catch { missing.append("live TV") }
+                do { loaded += try await movies } catch { missing.append("movies") }
+                do { shows = try await series } catch { missing.append("series") }
+                guard !loaded.isEmpty || !shows.isEmpty else { throw CatalogError.rejected }
+                if remember { try Vault.save(credentials) } else { Vault.clear() }
+                library.replace(loaded, series: shows)
+                if !missing.isEmpty { message = "Could not load: " + missing.joined(separator: ", ") }
             } else {
                 let raw = playlist.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { throw CatalogError.invalidURL }
                 let data = try await Catalog.fetch(url)
                 guard let text = String(data: data, encoding: .utf8), text.contains("#EXTM3U") else { throw CatalogError.malformed }
-                items = Catalog.m3u(text, base: url)
+                library.replace(Catalog.m3u(text, base: url))
+                message = "M3U items appear as live TV. Use Xtream for movies and series catalogs."
             }
-            if items.isEmpty { message = "No items returned. Check your provider's catalog or selected source." }
-        } catch {
-            // Avoid localized network errors: these can disclose URLs containing passwords.
-            message = (error as? CatalogError)?.errorDescription ?? "Could not load catalog. Check network, server URL and login."
+        } catch { message = (error as? CatalogError)?.errorDescription ?? "Could not load catalog. Check network and login." }
+    }
+}
+
+struct MediaCard: View {
+    let name: String
+    let subtitle: String
+    let kind: String
+    let symbol: String
+    let artwork: URL?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack(alignment: .topLeading) {
+                LinearGradient(colors: [.cyan.opacity(0.3), .indigo.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                AsyncImage(url: artwork) { phase in
+                    if let image = phase.image { image.resizable().scaledToFit() }
+                    else { Image(systemName: symbol).font(.system(size: 42)) }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                Text(kind).font(.caption2.bold()).padding(6).background(.black.opacity(0.5)).clipShape(Capsule()).padding(8)
+            }.frame(height: 110).clipShape(RoundedRectangle(cornerRadius: 12))
+            Text(name).font(.headline).lineLimit(2).frame(height: 44, alignment: .topLeading)
+            Text(subtitle.isEmpty ? kind.capitalized : subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        }.padding(10).background(.white.opacity(0.055)).clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+struct SeriesView: View {
+    let series: Series
+    @State private var episodes: [Channel] = []
+    @State private var error = ""
+    @State private var loading = true
+    @State private var search = ""
+    @State private var selected: Channel?
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            List {
+                if loading { ProgressView("Loading episodes") }
+                if !error.isEmpty { Text(error).foregroundStyle(.orange) }
+                ForEach(episodes.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.group.localizedCaseInsensitiveContains(search) }) { episode in
+                    Button { Playback.shared.open(episode); selected = episode } label: {
+                        VStack(alignment: .leading) { Text(episode.name); Text(episode.group).font(.caption).foregroundStyle(.secondary) }
+                    }
+                }
+            }.navigationTitle(series.name).searchable(text: $search, prompt: "Search episodes or seasons")
+                .toolbar { Button("Done") { dismiss() } }
+                .task {
+                    do { episodes = try await Catalog.episodes(series); if episodes.isEmpty { error = "No episodes returned." } }
+                    catch { error = "Could not load episodes. Check provider and connection." }
+                    loading = false
+                }
+                .sheet(item: $selected) { PlaybackView(channel: $0) }
         }
     }
 }
 
 @MainActor
 final class Playback: ObservableObject {
+    static let shared = Playback()
     let player = AVPlayer()
+    private var remoteTargets: [(MPRemoteCommand, Any)] = []
+    private var timeObserver: Any?
+
+    private init() {
+        let center = MPRemoteCommandCenter.shared()
+        func register(_ command: MPRemoteCommand, _ action: @escaping @MainActor () -> Void) {
+            let token = command.addTarget { _ in
+                Task { @MainActor in action() }
+                return .success
+            }
+            remoteTargets.append((command, token))
+        }
+        register(center.playCommand) { [weak self] in self?.player.play() }
+        register(center.pauseCommand) { [weak self] in self?.player.pause() }
+        register(center.togglePlayPauseCommand) { [weak self] in
+            guard let self else { return }
+            if self.player.rate == 0 { self.player.play() } else { self.player.pause() }
+        }
+        register(center.stopCommand) { [weak self] in self?.stop() }
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 600), queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.publishNowPlaying() }
+        }
+    }
+    private func publishNowPlaying() {
+        guard let channel else { return }
+        var info: [String: Any] = [MPMediaItemPropertyTitle: channel.name,
+            MPMediaItemPropertyArtist: channel.group,
+            MPNowPlayingInfoPropertyIsLiveStream: channel.live,
+            MPNowPlayingInfoPropertyPlaybackRate: player.rate]
+        let elapsed = player.currentTime().seconds
+        if elapsed.isFinite { info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed }
+        if let duration = player.currentItem?.duration.seconds, duration.isFinite {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
     @Published var state = "Preparing"
     @Published var diagnostic = ""
-    private var channel: Channel?
+    @Published private(set) var channel: Channel?
     private var observations: [NSKeyValueObservation] = []
     private var tokens: [NSObjectProtocol] = []
     private var retries = 0
     private var retryTask: Task<Void, Never>?
 
     func open(_ channel: Channel) {
+        retryTask?.cancel(); retryTask = nil; diagnostic = ""
         self.channel = channel; retries = 0
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
@@ -160,6 +301,7 @@ final class Playback: ObservableObject {
             Task { @MainActor [weak self] in self?.reconnect() }
         })
         player.play()
+        publishNowPlaying()
     }
     private func reconnect() {
         guard channel?.live == true else { state = "Playback failed"; return }
@@ -178,13 +320,15 @@ final class Playback: ObservableObject {
     func stop() {
         retryTask?.cancel(); retryTask = nil; detach()
         player.pause(); player.replaceCurrentItem(with: nil); channel = nil
+        state = "Stopped"
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }
 
 struct PlaybackView: View {
     let channel: Channel
-    @StateObject private var playback = Playback()
+    @ObservedObject private var playback = Playback.shared
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
@@ -196,15 +340,15 @@ struct PlaybackView: View {
                     Button("Retry") { playback.retry() }.buttonStyle(.borderedProminent)
                     AirPlayPicker().frame(width: 44, height: 44)
                 }
-                Text("AirPlay targets depend on the receiver. A working CarTV connection does not guarantee this prototype can send video to your Kia.")
+                Text(StreamLibrary.shared.carStatus)
                     .font(.footnote).foregroundStyle(.secondary).padding()
                 Spacer()
             }
-            .navigationTitle(channel.name).navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Close") { dismiss() } }
+            .navigationTitle(playback.channel?.name ?? channel.name).navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Stop") { playback.stop(); dismiss() }
+                Button("Close") { dismiss() } }
         }
-        .onAppear { playback.open(channel) }
-        .onDisappear { playback.stop() }
+        .onAppear { if playback.channel?.id != channel.id { playback.open(channel) } }
     }
 }
 
