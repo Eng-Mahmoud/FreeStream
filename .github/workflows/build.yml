@@ -14,14 +14,30 @@ jobs:
         run: xcodegen generate
       - name: Detect CarPlay video SDK
         run: |
+          set -euo pipefail
+          xcodebuild -version
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          HEADERS="$SDK_PATH/System/Library/Frameworks/CarPlay.framework/Headers"
-          if test -f "$HEADERS/CPPlaybackConfiguration.h" && rg -q 'supportsVideoPlayback|videoPlaybackSupported' "$HEADERS/CPSessionConfiguration.h" && rg -q 'CPPlayableItem' "$HEADERS/CPListItem.h"; then
+          echo "Selected SDK: $SDK_PATH"
+          PROBE_PATH="$RUNNER_TEMP/MahmoudTVVideoProbe.swift"
+          cat > "$PROBE_PATH" <<'SWIFT'
+          import CarPlay
+          import AVFoundation
+          @MainActor
+          @available(iOS 27.0, *)
+          func checkVideoAPI(_ item: CPListItem, _ session: CPSessionConfiguration) {
+              let supportsVideo = session.supportsVideoPlayback
+              item.playbackConfiguration = CPPlaybackConfiguration(
+                  preferredPresentation: supportsVideo ? .video : .audio,
+                  playbackAction: .play, elapsedTime: .zero, duration: .zero)
+          }
+          SWIFT
+          if xcrun --sdk iphoneos swiftc -typecheck -swift-version 5 -sdk "$SDK_PATH" -target arm64-apple-ios27.0 "$PROBE_PATH" > "$RUNNER_TEMP/MahmoudTVVideoProbe.log" 2>&1; then
             echo 'VIDEO_SWIFT_FLAGS=FREESTREAM_VIDEO_SDK' >> "$GITHUB_ENV"
-            echo 'CarPlay video APIs present.'
+            echo 'CarPlay video APIs: compiler check passed.'
           else
+            cat "$RUNNER_TEMP/MahmoudTVVideoProbe.log"
             echo 'VIDEO_SWIFT_FLAGS=' >> "$GITHUB_ENV"
-            echo '::warning::SDK lacks CarPlay video APIs. This build includes CarPlay audio browsing only. Use a runner with a compatible Xcode SDK for video.'
+            echo '::warning::CarPlay video API compiler check failed. This build will include audio browsing only. See the probe errors above.'
           fi
       - name: Build unsigned device app
         run: xcodebuild -project FreeStream.xcodeproj -scheme FreeStream -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build CODE_SIGNING_ALLOWED=NO SWIFT_ACTIVE_COMPILATION_CONDITIONS="$VIDEO_SWIFT_FLAGS" build
