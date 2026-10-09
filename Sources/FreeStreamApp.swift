@@ -5,144 +5,64 @@ import MediaPlayer
 @main
 struct FreeStreamApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    var body: some Scene { WindowGroup { HomeView().preferredColorScheme(.dark) } }
+    var body: some Scene { WindowGroup { LibraryTabs().preferredColorScheme(.dark) } }
 }
 
 struct HomeView: View {
-    @StateObject private var library = StreamLibrary.shared
-    @ObservedObject private var playback = Playback.shared
-    @State private var credentials = Vault.load()
-    @State private var source = 0
-    @State private var hls = true
-    @State private var playlist = ""
+    var favoritesOnly = false
+    @Binding var selectedTab: Int
+    @ObservedObject private var library = StreamLibrary.shared
+    @ObservedObject private var favorites = Favorites.shared
     @State private var search = ""
     @State private var filter = "All"
-    @State private var busy = false
-    @State private var message = ""
-    @State private var settings = false
     @State private var selected: Channel?
     @State private var selectedSeries: Series?
-    @State private var remember = false
-    private let columns = [GridItem(.adaptive(minimum: 150), spacing: 14)]
+    private var groups: [MediaGroup] {
+        MediaGroup.make(items: library.items, shows: library.series).compactMap { group in
+            guard filter == "All" || filter == group.kind.filterName else { return nil }
+            let channels = group.channels.filter {
+                (!favoritesOnly || favorites.contains($0)) && matches($0.name, $0.group)
+            }
+            let shows = group.shows.filter {
+                (!favoritesOnly || favorites.contains($0)) && matches($0.name, $0.group)
+            }
+            guard !channels.isEmpty || !shows.isEmpty else { return nil }
+            return MediaGroup(id: group.id, name: group.name, kind: group.kind, channels: channels, shows: shows)
+        }
+    }
     private func matches(_ name: String, _ group: String) -> Bool {
         search.isEmpty || name.localizedCaseInsensitiveContains(search) || group.localizedCaseInsensitiveContains(search)
-    }
-    private var channels: [Channel] {
-        library.items.filter { matches($0.name, $0.group) && (filter == "All" || (filter == "Live" && $0.live) || (filter == "Movies" && !$0.live)) }
-    }
-    private var shows: [Series] {
-        library.series.filter { (filter == "All" || filter == "Series") && matches($0.name, $0.group) }
     }
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("Your entertainment").font(.largeTitle.bold())
-                            Text("Live TV, movies and series in one place").foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if busy { ProgressView() }
-                    }
+                LazyVStack(alignment: .leading, spacing: 26) {
+                    Text("MahmoudTV").font(.largeTitle.bold())
                     Picker("Content", selection: $filter) {
                         ForEach(["All", "Live", "Movies", "Series"], id: \.self) { Text($0).tag($0) }
                     }.pickerStyle(.segmented)
-                    if !message.isEmpty { Text(message).foregroundStyle(.orange).font(.footnote) }
                     if library.items.isEmpty && library.series.isEmpty {
-                        ContentUnavailableView("Add your media source", systemImage: "play.rectangle", description: Text("Open Sources to load live channels, movies and series."))
-                        Button("Sources") { settings = true }.buttonStyle(.borderedProminent)
+                        ContentUnavailableView("Add your media source", systemImage: "play.rectangle", description: Text("Open Settings to load live TV, movies and series."))
+                        Button("Open Settings") { selectedTab = 2 }.buttonStyle(.borderedProminent)
+                    } else if groups.isEmpty {
+                        ContentUnavailableView(favoritesOnly ? "No favorites found" : "No results", systemImage: favoritesOnly ? "heart" : "magnifyingglass", description: Text(favoritesOnly ? "Tap a heart while browsing or watching. Try another filter or search." : "Try another filter or search."))
                     }
-                    Text("\(channels.count + shows.count) results").font(.caption).foregroundStyle(.secondary)
-                    LazyVGrid(columns: columns, spacing: 14) {
-                        ForEach(channels) { item in
-                            Button { playback.open(item); selected = item } label: {
-                                MediaCard(name: item.name, subtitle: item.group, kind: item.live ? "LIVE" : "MOVIE", symbol: item.live ? "tv" : "film", artwork: item.artwork)
-                            }.buttonStyle(.plain)
-                        }
-                        ForEach(shows) { show in
-                            Button { selectedSeries = show } label: {
-                                MediaCard(name: show.name, subtitle: show.group, kind: "SERIES", symbol: "rectangle.stack", artwork: show.artwork)
-                            }.buttonStyle(.plain)
-                        }
+                    ForEach(groups) { group in
+                        MediaGroupRow(group: group, favoritesOnly: favoritesOnly, play: { item in
+                            Playback.shared.open(item, queue: item.live ? group.channels : [item]); selected = item
+                        }, openSeries: { selectedSeries = $0 })
                     }
-                    Text(library.carStatus).font(.footnote).foregroundStyle(.secondary)
                 }.padding()
             }
             .background(Color(red: 0.035, green: 0.045, blue: 0.075))
-            .navigationTitle("MahmoudTV")
-            .searchable(text: $search, prompt: "Search live TV, movies and series")
-            .toolbar { Button { settings = true } label: { Image(systemName: "slider.horizontal.3") } }
+            .navigationTitle(favoritesOnly ? "Favorites" : "Home")
+            .searchable(text: $search, prompt: "Search media or source groups")
             .safeAreaInset(edge: .bottom) {
-                if let current = playback.channel {
-                    HStack {
-                        Button { selected = current } label: {
-                            VStack(alignment: .leading) { Text(current.name).lineLimit(1); Text(playback.state).font(.caption) }
-                        }
-                        Spacer()
-                        Button { if playback.player.rate == 0 { playback.player.play() } else { playback.player.pause() } } label: { Image(systemName: playback.player.rate == 0 ? "play.fill" : "pause.fill") }
-                        Button { playback.stop() } label: { Image(systemName: "stop.fill") }
-                    }.padding().background(.ultraThinMaterial)
-                }
-            }
-            .sheet(isPresented: $settings) {
-                NavigationStack {
-                    Form {
-                        Section("Source") {
-                            Picker("Type", selection: $source) { Text("Xtream").tag(0); Text("M3U URL").tag(1) }.pickerStyle(.segmented)
-                            if source == 0 {
-                                TextField("Server URL, including port", text: $credentials.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-                                TextField("Username", text: $credentials.username).textInputAutocapitalization(.never).autocorrectionDisabled()
-                                SecureField("Password", text: $credentials.password)
-                                Toggle("Use HLS for live TV", isOn: $hls)
-                                Toggle("Remember login in Keychain", isOn: $remember)
-                            } else {
-                                SecureField("M3U playlist URL", text: $playlist).textInputAutocapitalization(.never).autocorrectionDisabled()
-                            }
-                            Button(busy ? "Loading…" : "Load all content") { Task { await load() } }.disabled(busy)
-                            if !message.isEmpty { Text(message).font(.footnote).foregroundStyle(.orange) }
-                        }
-                        Section("CarPlay") {
-                            Toggle("Save catalog for access from car", isOn: $library.rememberCatalog)
-                            Text(library.carStatus).font(.footnote)
-                            Text("Saved catalogs include stream credentials and are stored in this device’s Keychain. Series episode lists require a network connection. Video availability is controlled by CarPlay.").font(.footnote)
-                        }
-                        Section {
-                            Button("Forget login and catalog", role: .destructive) { Vault.clear(); library.clear(); credentials = Credentials(); remember = false; playback.stop() }.disabled(busy)
-                        }
-                    }.navigationTitle("Sources").toolbar { Button("Done") { settings = false } }
-                }
+                MiniPlayer { selected = $0 }
             }
             .sheet(item: $selected) { PlaybackView(channel: $0) }
             .sheet(item: $selectedSeries) { SeriesView(series: $0) }
         }.tint(.cyan)
-    }
-    @MainActor private func load() async {
-        busy = true; message = ""
-        defer { busy = false }
-        do {
-            if source == 0 {
-                // Each catalog can fail independently; keep the successful content types.
-                var loaded: [Channel] = []; var shows: [Series] = []; var missing: [String] = []
-                async let live = Catalog.xtream(credentials, movie: false, hls: hls)
-                async let movies = Catalog.xtream(credentials, movie: true, hls: hls)
-                async let series = Catalog.series(credentials)
-                do { loaded += try await live } catch { missing.append("live TV") }
-                do { loaded += try await movies } catch { missing.append("movies") }
-                do { shows = try await series } catch { missing.append("series") }
-                guard !loaded.isEmpty || !shows.isEmpty else { throw CatalogError.rejected }
-                if remember { try Vault.save(credentials) } else { Vault.clear() }
-                library.replace(loaded, series: shows)
-                if !missing.isEmpty { message = "Could not load: " + missing.joined(separator: ", ") }
-            } else {
-                let raw = playlist.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { throw CatalogError.invalidURL }
-                let data = try await Catalog.fetch(url)
-                guard let text = String(data: data, encoding: .utf8), text.contains("#EXTM3U") else { throw CatalogError.malformed }
-                library.replace(Catalog.m3u(text, base: url))
-                message = "M3U items appear as live TV. Use Xtream for movies and series catalogs."
-            }
-        } catch { message = (error as? CatalogError)?.errorDescription ?? "Could not load catalog. Check network and login." }
     }
 }
 
@@ -161,7 +81,7 @@ struct MediaCard: View {
                     else { Image(systemName: symbol).font(.system(size: 42)) }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 Text(kind).font(.caption2.bold()).padding(6).background(.black.opacity(0.5)).clipShape(Capsule()).padding(8)
-            }.frame(height: 110).clipShape(RoundedRectangle(cornerRadius: 12))
+            }.frame(height: kind == "MOVIE" || kind == "SERIES" ? 205 : 110).clipShape(RoundedRectangle(cornerRadius: 12))
             Text(name).font(.headline).lineLimit(2).frame(height: 44, alignment: .topLeading)
             Text(subtitle.isEmpty ? kind.capitalized : subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }.padding(10).background(.white.opacity(0.055)).clipShape(RoundedRectangle(cornerRadius: 16))
@@ -170,6 +90,7 @@ struct MediaCard: View {
 
 struct SeriesView: View {
     let series: Series
+    @ObservedObject private var favorites = Favorites.shared
     @State private var episodes: [Channel] = []
     @State private var episodeMessage = ""
     @State private var loading = true
@@ -178,16 +99,20 @@ struct SeriesView: View {
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
-            List {
-                if loading { ProgressView("Loading episodes") }
-                if !episodeMessage.isEmpty { Text(episodeMessage).foregroundStyle(.orange) }
-                ForEach(episodes.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.group.localizedCaseInsensitiveContains(search) }) { episode in
-                    Button { Playback.shared.open(episode); selected = episode } label: {
-                        VStack(alignment: .leading) { Text(episode.name); Text(episode.group).font(.caption).foregroundStyle(.secondary) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if loading { ProgressView("Loading episodes") }
+                    if !episodeMessage.isEmpty { Text(episodeMessage).foregroundStyle(.orange) }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
+                        ForEach(episodes.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.group.localizedCaseInsensitiveContains(search) }) { episode in
+                            Button { Playback.shared.open(episode, queue: episodes, series: series); selected = episode } label: {
+                                MediaCard(name: episode.name, subtitle: episode.group, kind: "EPISODE", symbol: "play.rectangle", artwork: episode.artwork ?? series.artwork)
+                            }.buttonStyle(.plain)
+                        }
                     }
-                }
+                }.padding()
             }.navigationTitle(series.name).searchable(text: $search, prompt: "Search episodes or seasons")
-                .toolbar { Button("Done") { dismiss() } }
+                .toolbar { FavoriteButton(selected: favorites.contains(series)) { favorites.toggle(series) }; Button("Done") { dismiss() } }
                 .task {
                     do { episodes = try await Catalog.episodes(series); if episodes.isEmpty { episodeMessage = "No episodes returned." } }
                     catch { episodeMessage = "Could not load episodes. Check provider and connection." }
@@ -204,6 +129,7 @@ final class Playback: ObservableObject {
     let player = AVPlayer()
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var timeObserver: Any?
+    private var stallMonitor: Task<Void, Never>?
 
     private init() {
         let center = MPRemoteCommandCenter.shared()
@@ -215,15 +141,26 @@ final class Playback: ObservableObject {
             remoteTargets.append((command, token))
         }
         register(center.playCommand) { [weak self] in self?.player.play() }
-        register(center.pauseCommand) { [weak self] in self?.player.pause() }
+        register(center.pauseCommand) { [weak self] in self?.pause() }
         register(center.togglePlayPauseCommand) { [weak self] in
             guard let self else { return }
-            if self.player.rate == 0 { self.player.play() } else { self.player.pause() }
+            self.togglePause()
         }
+        register(center.nextTrackCommand) { [weak self] in self?.next() }
+        register(center.previousTrackCommand) { [weak self] in self?.previous() }
         register(center.stopCommand) { [weak self] in self?.stop() }
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 600), queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.publishNowPlaying() }
+            Task { @MainActor in
+                self?.publishNowPlaying()
+                self?.updateTimeline()
+            }
         }
+    }
+    private func updateTimeline() {
+        let value = player.currentTime().seconds
+        elapsed = value.isFinite ? max(0, value) : 0
+        let total = player.currentItem?.duration.seconds ?? 0
+        duration = total.isFinite ? max(0, total) : 0
     }
     private func publishNowPlaying() {
         guard let channel else { return }
@@ -241,14 +178,48 @@ final class Playback: ObservableObject {
     @Published var state = "Preparing"
     @Published var diagnostic = ""
     @Published private(set) var channel: Channel?
+    @Published private(set) var queue: [Channel] = []
+    @Published private(set) var series: Series?
+    @Published private(set) var elapsed: Double = 0
+    @Published private(set) var duration: Double = 0
+    @Published private(set) var playing = false
+    private var queueIndex: Int? { queue.firstIndex { $0.id == channel?.id } }
+    var canGoNext: Bool { guard let index = queueIndex else { return false }; return index + 1 < queue.count }
+    var canGoPrevious: Bool { guard let index = queueIndex else { return false }; return index > 0 }
+    func next() { guard let index = queueIndex, canGoNext else { return }; open(queue[index + 1], queue: queue, series: series) }
+    func previous() { guard let index = queueIndex, canGoPrevious else { return }; open(queue[index - 1], queue: queue, series: series) }
+    func pause() {
+        retryTask?.cancel(); retryTask = nil; waitingSince = nil
+        player.pause()
+    }
+    func togglePause() {
+        if player.timeControlStatus == .paused { player.play() } else { pause() }
+    }
+    func seek(_ seconds: Double) {
+        guard channel?.live == false, duration > 0 else { return }
+        player.seek(to: CMTime(seconds: min(duration, max(0, seconds)), preferredTimescale: 600))
+    }
     private var observations: [NSKeyValueObservation] = []
     private var tokens: [NSObjectProtocol] = []
     private var retries = 0
     private var retryTask: Task<Void, Never>?
+    private var waitingSince: Date?
+    private var resumePosition: Double = 0
 
-    func open(_ channel: Channel) {
+    func open(_ channel: Channel, queue: [Channel]? = nil, series: Series? = nil) {
+        self.queue = queue ?? (channel.live ? StreamLibrary.shared.items.filter { $0.live } : [channel])
+        self.series = series
+        elapsed = 0; duration = 0
+        stallMonitor?.cancel()
+        stallMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { break }
+                guard let self else { return }
+                self.checkForStall()
+            }
+        }
         retryTask?.cancel(); retryTask = nil; diagnostic = ""
-        self.channel = channel; retries = 0
+        self.channel = channel; retries = 0; resumePosition = 0; waitingSince = nil
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try AVAudioSession.sharedInstance().setActive(true)
@@ -263,15 +234,26 @@ final class Playback: ObservableObject {
     private func replaceItem() {
         guard let channel else { return }
         detach()
+        waitingSince = nil
         state = "Connecting"
         let item = AVPlayerItem(url: channel.url)
         item.preferredForwardBufferDuration = channel.live ? 8 : 15
         player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = true
         player.replaceCurrentItem(with: item)
-        observations.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
+        observations.append(item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             Task { @MainActor [weak self] in
                 guard let self, self.player.currentItem === item else { return }
+                if item.status == .readyToPlay, !channel.live, self.resumePosition > 0 {
+                    let position = self.resumePosition
+                    self.resumePosition = 0
+                    self.player.seek(to: CMTime(seconds: position, preferredTimescale: 600)) { [weak self] completed in
+                        Task { @MainActor in
+                            guard completed, let self, self.player.currentItem === item else { return }
+                            self.player.play()
+                        }
+                    }
+                }
                 if item.status == .failed {
                     if let error = item.error as NSError? {
                         self.diagnostic = "Player error: \(error.domain), code \(error.code). Try HLS for live TV; VOD may use an unsupported codec."
@@ -280,31 +262,38 @@ final class Playback: ObservableObject {
                 }
             }
         })
-        observations.append(player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+        observations.append(player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.player.currentItem === item else { return }
                 switch player.timeControlStatus {
-                case .playing: self.state = "Playing"
-                case .waitingToPlayAtSpecifiedRate: self.state = "Buffering"
-                case .paused: self.state = "Paused"
+                case .playing: self.playing = true; self.waitingSince = nil; self.state = "Playing"
+                case .waitingToPlayAtSpecifiedRate:
+                    self.playing = false
+                    if self.waitingSince == nil { self.waitingSince = Date() }
+                    self.state = "Buffering"
+                case .paused: self.playing = false; self.waitingSince = nil; self.state = "Paused"
                 @unknown default: self.state = "Unknown"
                 }
             }
         })
         tokens.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.player.currentItem === item else { return }
                 if self.channel?.live == true { self.reconnect() } else { self.state = "Finished" }
             }
         })
         tokens.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.reconnect() }
+            Task { @MainActor [weak self] in
+                guard let self, self.player.currentItem === item else { return }
+                self.reconnect()
+            }
         })
         player.play()
         publishNowPlaying()
     }
     private func reconnect() {
-        guard channel?.live == true else { state = "Playback failed"; return }
+        guard channel != nil else { return }
+        rememberPosition()
         guard retryTask == nil else { return }
         guard retries < 3 else { state = "Stopped after 3 retries. Tap Retry."; return }
         retries += 1
@@ -316,10 +305,26 @@ final class Playback: ObservableObject {
             self.replaceItem()
         }
     }
-    func retry() { retryTask?.cancel(); retryTask = nil; retries = 0; diagnostic = ""; replaceItem() }
+    private func rememberPosition() {
+        guard channel?.live == false else { return }
+        let seconds = player.currentTime().seconds
+        if seconds.isFinite, seconds > 0 { resumePosition = seconds }
+    }
+    private func checkForStall() {
+        guard channel?.live == false, retryTask == nil, retries < 3,
+              player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+              let since = waitingSince, Date().timeIntervalSince(since) >= 12 else { return }
+        reconnect()
+    }
+    func retry() {
+        rememberPosition()
+        retryTask?.cancel(); retryTask = nil; retries = 0; diagnostic = ""; replaceItem()
+    }
     func stop() {
+        stallMonitor?.cancel(); stallMonitor = nil
         retryTask?.cancel(); retryTask = nil; detach()
         player.pause(); player.replaceCurrentItem(with: nil); channel = nil
+        queue = []; series = nil; playing = false; elapsed = 0; duration = 0
         state = "Stopped"
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -329,26 +334,49 @@ final class Playback: ObservableObject {
 struct PlaybackView: View {
     let channel: Channel
     @ObservedObject private var playback = Playback.shared
+    @State private var fullscreen = false
+    @AppStorage("MahmoudTV.displayMode") private var displayMode = "Fit"
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                VideoPlayer(player: playback.player).frame(minHeight: 240)
-                Text(playback.state).font(.headline)
-                if !playback.diagnostic.isEmpty { Text(playback.diagnostic).font(.footnote).padding(.horizontal) }
-                HStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    if !fullscreen {
+                        PlayerPanel(displayMode: $displayMode, fullscreen: $fullscreen, isFullscreen: false)
+                            .frame(height: 300)
+                    } else { Color.black.frame(height: 300) }
+                    Text(playback.state).font(.headline)
+                    if !playback.diagnostic.isEmpty { Text(playback.diagnostic).font(.footnote).padding(.horizontal) }
                     Button("Retry") { playback.retry() }.buttonStyle(.borderedProminent)
-                    AirPlayPicker().frame(width: 44, height: 44)
+                    if playback.queue.count > 1 {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            Text(playback.series?.name ?? "Live channels").font(.title2.bold())
+                            ForEach(playback.queue) { item in
+                                Button {
+                                    playback.open(item, queue: playback.queue, series: playback.series)
+                                } label: {
+                                    HStack {
+                                        Image(systemName: item.id == playback.channel?.id ? "speaker.wave.2.fill" : "play.circle")
+                                        Text(item.name).lineLimit(2)
+                                        Spacer()
+                                    }.padding(12).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                                }.tint(item.id == playback.channel?.id ? .green : .primary)
+                            }
+                        }.padding(.horizontal)
+                    }
+                    Text(StreamLibrary.shared.carStatus).font(.footnote).foregroundStyle(.secondary).padding()
                 }
-                Text(StreamLibrary.shared.carStatus)
-                    .font(.footnote).foregroundStyle(.secondary).padding()
-                Spacer()
             }
             .navigationTitle(playback.channel?.name ?? channel.name).navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Stop") { playback.stop(); dismiss() }
-                Button("Close") { dismiss() } }
+            .toolbar {
+                Button("Stop") { playback.stop(); dismiss() }
+                Button("Close") { dismiss() }
+            }
         }
-        .onAppear { if playback.channel?.id != channel.id { playback.open(channel) } }
+        .fullScreenCover(isPresented: $fullscreen) {
+            PlayerPanel(displayMode: $displayMode, fullscreen: $fullscreen, isFullscreen: true)
+                .background(.black).preferredColorScheme(.dark)
+        }
     }
 }
 

@@ -70,9 +70,9 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             ? "Load a catalog on iPhone first" : (supportsVideo ? "Video supported when available" : "Audio mode"), sectionIndexTitle: nil)
         controller?.setRootTemplate(CPListTemplate(title: "MahmoudTV", sections: [section]), animated: false, completion: nil)
     }
-    private func channelRow(_ channel: Channel) -> CPListItem {
+    private func channelRow(_ channel: Channel, queue: [Channel]? = nil, series: Series? = nil) -> CPListItem {
         let item = row(channel.name, detail: channel.group) { [weak self] in
-            Playback.shared.open(channel)
+            Playback.shared.open(channel, queue: queue, series: series)
             // Video presentation is managed by CarPlay; no custom car window or policy bypass.
             if self?.supportsVideo != true {
                 self?.controller?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
@@ -89,10 +89,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         return item
     }
     private var pageSize: Int { max(1, min(80, CPListTemplate.maximumItemCount - 1)) }
-    private func showChannels(_ channels: [Channel], title: String, offset: Int = 0) {
-        var rows = channels.dropFirst(offset).prefix(pageSize).map(channelRow)
+    private func showChannels(_ channels: [Channel], title: String, offset: Int = 0, series: Series? = nil) {
+        var rows = channels.dropFirst(offset).prefix(pageSize).map { channelRow($0, queue: ($0.live || series != nil) ? channels : [$0], series: series) }
         if offset + pageSize < channels.count {
-            rows.append(row("More…") { [weak self] in self?.showChannels(channels, title: title, offset: offset + (self?.pageSize ?? 80)) })
+            rows.append(row("More…") { [weak self] in self?.showChannels(channels, title: title, offset: offset + (self?.pageSize ?? 80), series: series) })
         }
         if rows.isEmpty { rows = [row("No items", detail: "Load this catalog on iPhone") {}] }
         presentPage(rows, title: title, offset: offset)
@@ -104,7 +104,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                 defer { completion() }
                 do {
                     let episodes = try await Catalog.episodes(series)
-                    self?.showChannels(episodes, title: series.name)
+                    self?.showChannels(episodes, title: series.name, series: series)
                 } catch {
                     self?.controller?.pushTemplate(CPListTemplate(title: "Episodes unavailable", sections: [CPListSection(items: [CPListItem(text: "Check provider and network", detailText: "Try again later")])]), animated: true, completion: nil)
                 }
@@ -151,7 +151,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         }
         let channels = library.items.filter { $0.name.localizedCaseInsensitiveContains(searchText) || $0.group.localizedCaseInsensitiveContains(searchText) }
         let series = library.series.filter { $0.name.localizedCaseInsensitiveContains(searchText) || $0.group.localizedCaseInsensitiveContains(searchText) }
-        searchEntries = Array((channels.prefix(pageSize).map(channelRow) + series.prefix(pageSize).map(seriesRow)).prefix(pageSize))
+        searchEntries = Array((channels.prefix(pageSize).map { channelRow($0) } + series.prefix(pageSize).map(seriesRow)).prefix(pageSize))
         completionHandler(searchEntries)
     }
     func searchTemplate(_ searchTemplate: CPSearchTemplate, selectedResult item: CPListItem,

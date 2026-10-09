@@ -46,6 +46,7 @@ struct Channel: Identifiable, Codable {
     var url: URL
     var live: Bool
     var artwork: URL? = nil
+    var categoryID: String? = nil
 }
 
 enum Catalog {
@@ -75,7 +76,7 @@ enum Catalog {
             guard let id = scalar(row["stream_id"]), let name = row["name"] as? String else { return nil }
             let ext = movie ? (scalar(row["container_extension"]) ?? "mp4") : (hls ? "m3u8" : "ts")
             return Channel(id: "\(movie ? "vod" : "live"):\(id)", name: name,
-                           group: names[scalar(row["category_id"]) ?? ""] ?? scalar(row["category_id"]) ?? "", url: try c.streamURL(id: id, movie: movie, ext: ext), live: !movie, artwork: scalar(row["stream_icon"]).flatMap(URL.init(string:)))
+                           group: names[scalar(row["category_id"]) ?? ""] ?? scalar(row["category_id"]) ?? "", url: try c.streamURL(id: id, movie: movie, ext: ext), live: !movie, artwork: scalar(row["stream_icon"]).flatMap(URL.init(string:)), categoryID: scalar(row["category_id"]))
         }
     }
     static func m3u(_ text: String, base: URL) -> [Channel] {
@@ -133,6 +134,7 @@ struct Series: Identifiable, Codable {
     let group: String
     let credentials: Credentials
     var artwork: URL? = nil
+    var categoryID: String? = nil
 }
 
 extension Catalog {
@@ -152,7 +154,7 @@ extension Catalog {
         let names = (try? await categories) ?? [:]
         return rows.compactMap { row in
             guard let id = scalar(row["series_id"]), let name = row["name"] as? String else { return nil }
-            return Series(id: id, name: name, group: names[scalar(row["category_id"]) ?? ""] ?? scalar(row["category_id"]) ?? "", credentials: credentials, artwork: scalar(row["cover"]).flatMap(URL.init(string:)))
+            return Series(id: id, name: name, group: names[scalar(row["category_id"]) ?? ""] ?? scalar(row["category_id"]) ?? "", credentials: credentials, artwork: scalar(row["cover"]).flatMap(URL.init(string:)), categoryID: scalar(row["category_id"]))
         }
     }
     static func episodes(_ series: Series) async throws -> [Channel] {
@@ -171,7 +173,7 @@ extension Catalog {
                     .appendingPathComponent(series.credentials.username).appendingPathComponent(series.credentials.password)
                     .appendingPathComponent("\(id).\(ext)")
                 result.append(Channel(id: "episode:\(id)", name: scalar(row["title"]) ?? "Episode \(scalar(row["episode_num"]) ?? id)",
-                                      group: "\(series.name) • Season \(season)", url: stream, live: false))
+                                      group: "\(series.name) • Season \(season)", url: stream, live: false, artwork: ((row["info"] as? [String: Any]).flatMap { scalar($0["movie_image"]) }).flatMap(URL.init(string:)) ?? series.artwork))
             }
         }
         return result
