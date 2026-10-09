@@ -22,8 +22,8 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: MahmoudTV
-        CFBundleShortVersionString: '0.3.1'
-        CFBundleVersion: '5'
+        CFBundleShortVersionString: '0.3.2'
+        CFBundleVersion: '6'
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]

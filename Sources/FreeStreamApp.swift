@@ -129,7 +129,6 @@ final class Playback: ObservableObject {
     let player = AVPlayer()
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var timeObserver: Any?
-    private var stallMonitor: Task<Void, Never>?
 
     private init() {
         let center = MPRemoteCommandCenter.shared()
@@ -189,7 +188,7 @@ final class Playback: ObservableObject {
     func next() { guard let index = queueIndex, canGoNext else { return }; open(queue[index + 1], queue: queue, series: series) }
     func previous() { guard let index = queueIndex, canGoPrevious else { return }; open(queue[index - 1], queue: queue, series: series) }
     func pause() {
-        retryTask?.cancel(); retryTask = nil; waitingSince = nil
+        retryTask?.cancel(); retryTask = nil
         player.pause()
     }
     func togglePause() {
@@ -203,23 +202,16 @@ final class Playback: ObservableObject {
     private var tokens: [NSObjectProtocol] = []
     private var retries = 0
     private var retryTask: Task<Void, Never>?
-    private var waitingSince: Date?
-    private var resumePosition: Double = 0
 
     func open(_ channel: Channel, queue: [Channel]? = nil, series: Series? = nil) {
         self.queue = queue ?? (channel.live ? StreamLibrary.shared.items.filter { $0.live } : [channel])
         self.series = series
         elapsed = 0; duration = 0
-        stallMonitor?.cancel()
-        stallMonitor = Task { [weak self] in
-            while !Task.isCancelled {
-                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { break }
-                guard let self else { return }
-                self.checkForStall()
-            }
-        }
         retryTask?.cancel(); retryTask = nil; diagnostic = ""
-        self.channel = channel; retries = 0; resumePosition = 0; waitingSince = nil
+        self.channel = channel; retries = 0; recoveryExhausted = false; eventLog = []
+        let ext = channel.url.pathExtension.lowercased()
+        let format = ["m3u8", "ts", "mp4", "mkv", "mov", "m4v", "avi"].contains(ext) ? ext : "other"
+        record("Opened " + (channel.live ? "live" : "VOD") + " • " + format)
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try AVAudioSession.sharedInstance().setActive(true)
@@ -234,46 +226,34 @@ final class Playback: ObservableObject {
     private func replaceItem() {
         guard let channel else { return }
         detach()
-        waitingSince = nil
         state = "Connecting"
         let item = AVPlayerItem(url: channel.url)
         item.preferredForwardBufferDuration = channel.live ? 8 : 15
         player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = true
         player.replaceCurrentItem(with: item)
-        observations.append(item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+        observations.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
             Task { @MainActor [weak self] in
                 guard let self, self.player.currentItem === item else { return }
-                if item.status == .readyToPlay, !channel.live, self.resumePosition > 0 {
-                    let position = self.resumePosition
-                    self.resumePosition = 0
-                    self.player.seek(to: CMTime(seconds: position, preferredTimescale: 600)) { [weak self] completed in
-                        Task { @MainActor in
-                            guard completed, let self, self.player.currentItem === item else { return }
-                            self.player.play()
-                        }
-                    }
-                }
                 if item.status == .failed {
-                    if let error = item.error as NSError? {
-                        self.diagnostic = "Player error: \(error.domain), code \(error.code). Try HLS for live TV; VOD may use an unsupported codec."
-                    }
+                    self.captureFailure(item, error: item.error as NSError?)
                     self.reconnect()
                 }
             }
         })
-        observations.append(player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
+        observations.append(player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             Task { @MainActor [weak self] in
                 guard let self, self.player.currentItem === item else { return }
+                guard self.retryTask == nil, item.status != .failed, !self.recoveryExhausted else { return }
                 switch player.timeControlStatus {
-                case .playing: self.playing = true; self.waitingSince = nil; self.state = "Playing"
+                case .playing: self.playing = true; self.state = "Playing"
                 case .waitingToPlayAtSpecifiedRate:
                     self.playing = false
-                    if self.waitingSince == nil { self.waitingSince = Date() }
                     self.state = "Buffering"
-                case .paused: self.playing = false; self.waitingSince = nil; self.state = "Paused"
+                case .paused: self.playing = false; self.state = "Paused"
                 @unknown default: self.state = "Unknown"
                 }
+                self.record(self.state)
             }
         })
         tokens.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
@@ -282,22 +262,75 @@ final class Playback: ObservableObject {
                 if self.channel?.live == true { self.reconnect() } else { self.state = "Finished" }
             }
         })
-        tokens.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+        tokens.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] notification in
+            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
             Task { @MainActor [weak self] in
                 guard let self, self.player.currentItem === item else { return }
+                self.captureFailure(item, error: error ?? item.error as NSError?)
                 self.reconnect()
+            }
+        })
+        tokens.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemPlaybackStalled, object: item, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.player.currentItem === item else { return }
+                self.record("Stream stalled; waiting for the existing connection")
+            }
+        })
+        tokens.append(NotificationCenter.default.addObserver(forName: .AVPlayerItemNewErrorLogEntry, object: item, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.player.currentItem === item,
+                      let event = item.errorLog()?.events.last else { return }
+                self.diagnostic = "Stream error code: \(event.errorStatusCode)"
+                self.record(self.diagnostic)
             }
         })
         player.play()
         publishNowPlaying()
     }
+    private var recoveryExhausted = false
+    @Published private(set) var eventLog: [String] = []
+    private func record(_ message: String) {
+        // Messages below contain only state, format and numeric codes; never URLs or credentials.
+        let seconds = player.currentTime().seconds
+        let position = seconds.isFinite ? String(format: "%.1fs", seconds) : "--"
+        eventLog.append("[\(position)] \(message)")
+        if eventLog.count > 24 { eventLog.removeFirst(eventLog.count - 24) }
+    }
+    private func captureFailure(_ item: AVPlayerItem, error: NSError?) {
+        var codes: [String] = []
+        var current = error
+        for _ in 0..<4 {
+            guard let value = current else { break }
+            let allowed = ["AVFoundationErrorDomain", "NSURLErrorDomain", "NSOSStatusErrorDomain", "CoreMediaErrorDomain"]
+            let domain = allowed.contains(value.domain) ? value.domain : "Player"
+            codes.append("\(domain): \(value.code)")
+            current = value.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        if let event = item.errorLog()?.events.last { codes.append("Stream: \(event.errorStatusCode)") }
+        diagnostic = codes.isEmpty ? "Playback failed without an error code." : codes.joined(separator: " • ")
+        record(diagnostic)
+    }
     private func reconnect() {
-        guard channel != nil else { return }
-        rememberPosition()
+        guard channel != nil, !recoveryExhausted else { return }
+        // Match the earlier working release: only live playback automatically reconnects.
+        // VOD waits for an explicit Retry, with no timer and no seek back into the failed range.
+        guard channel?.live == true else {
+            recoveryExhausted = true; playing = false
+            state = "Playback failed. Tap Retry to restart."
+            player.pause()
+            record(state)
+            return
+        }
         guard retryTask == nil else { return }
-        guard retries < 3 else { state = "Stopped after 3 retries. Tap Retry."; return }
+        guard retries < 3 else {
+            recoveryExhausted = true; playing = false
+            state = "Stopped after 3 retries. Tap Retry."
+            player.pause(); record(state)
+            return
+        }
         retries += 1
         state = "Reconnecting (\(retries)/3)"
+        record(state)
         retryTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled, let self else { return }
@@ -305,26 +338,16 @@ final class Playback: ObservableObject {
             self.replaceItem()
         }
     }
-    private func rememberPosition() {
-        guard channel?.live == false else { return }
-        let seconds = player.currentTime().seconds
-        if seconds.isFinite, seconds > 0 { resumePosition = seconds }
-    }
-    private func checkForStall() {
-        guard channel?.live == false, retryTask == nil, retries < 3,
-              player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
-              let since = waitingSince, Date().timeIntervalSince(since) >= 12 else { return }
-        reconnect()
-    }
     func retry() {
-        rememberPosition()
-        retryTask?.cancel(); retryTask = nil; retries = 0; diagnostic = ""; replaceItem()
+        retryTask?.cancel(); retryTask = nil; retries = 0; recoveryExhausted = false
+        record("Manual restart from beginning")
+        replaceItem()
     }
     func stop() {
-        stallMonitor?.cancel(); stallMonitor = nil
         retryTask?.cancel(); retryTask = nil; detach()
         player.pause(); player.replaceCurrentItem(with: nil); channel = nil
         queue = []; series = nil; playing = false; elapsed = 0; duration = 0
+        recoveryExhausted = false
         state = "Stopped"
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -335,19 +358,46 @@ struct PlaybackView: View {
     let channel: Channel
     @ObservedObject private var playback = Playback.shared
     @State private var fullscreen = false
-    @AppStorage("MahmoudTV.displayMode") private var displayMode = "Fit"
+    @ObservedObject private var favorites = Favorites.shared
     @Environment(\.dismiss) private var dismiss
+    private var isFavorite: Bool {
+        if let show = playback.series { return favorites.contains(show) }
+        if let item = playback.channel { return favorites.contains(item) }
+        return false
+    }
+    private var playbackActions: some View {
+        HStack(spacing: 24) {
+            Button { playback.previous() } label: { Image(systemName: "backward.end.fill") }
+                .disabled(!playback.canGoPrevious).accessibilityLabel("Previous")
+            FavoriteButton(selected: isFavorite) {
+                if let show = playback.series { favorites.toggle(show) }
+                else if let item = playback.channel { favorites.toggle(item) }
+            }
+            Button { playback.next() } label: { Image(systemName: "forward.end.fill") }
+                .disabled(!playback.canGoNext).accessibilityLabel("Next")
+            AirPlayPicker().frame(width: 32, height: 32)
+            Button { fullscreen.toggle() } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+            }.accessibilityLabel("Toggle fullscreen")
+        }
+    }
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
                     if !fullscreen {
-                        PlayerPanel(displayMode: $displayMode, fullscreen: $fullscreen, isFullscreen: false)
+                        VideoPlayer(player: playback.player)
                             .frame(height: 300)
                     } else { Color.black.frame(height: 300) }
+                    playbackActions
                     Text(playback.state).font(.headline)
                     if !playback.diagnostic.isEmpty { Text(playback.diagnostic).font(.footnote).padding(.horizontal) }
-                    Button("Retry") { playback.retry() }.buttonStyle(.borderedProminent)
+                    Button("Retry from beginning") { playback.retry() }.buttonStyle(.borderedProminent)
+                    DisclosureGroup("Playback details • 0.3.2") {
+                        Text(playback.eventLog.joined(separator: "\n"))
+                            .font(.caption.monospaced()).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.padding(.horizontal)
                     if playback.queue.count > 1 {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             Text(playback.series?.name ?? "Live channels").font(.title2.bold())
@@ -374,8 +424,11 @@ struct PlaybackView: View {
             }
         }
         .fullScreenCover(isPresented: $fullscreen) {
-            PlayerPanel(displayMode: $displayMode, fullscreen: $fullscreen, isFullscreen: true)
-                .background(.black).preferredColorScheme(.dark)
+            VStack {
+                HStack { Spacer(); Button("Done") { fullscreen = false } }.padding(.horizontal)
+                VideoPlayer(player: playback.player)
+                playbackActions.padding(.bottom)
+            }.background(.black).preferredColorScheme(.dark)
         }
     }
 }
