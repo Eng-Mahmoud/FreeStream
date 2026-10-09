@@ -358,6 +358,29 @@ struct PlaybackView: View {
     let channel: Channel
     @ObservedObject private var playback = Playback.shared
     @State private var fullscreen = false
+    @AppStorage("MahmoudTV.nativeDisplayMode") private var modeName = "Fit"
+    @AppStorage("MahmoudTV.compatibilityPlayer") private var compatibilityPlayer = false
+    private var displayMode: VideoDisplayMode { VideoDisplayMode(rawValue: modeName) ?? .fit }
+    @ViewBuilder private var videoView: some View {
+        if compatibilityPlayer { VideoPlayer(player: playback.player) }
+        else { NativeVideoView(player: playback.player, mode: displayMode) }
+    }
+    private var displayControls: some View {
+        HStack {
+            Menu {
+                Picker("Video size", selection: $modeName) {
+                    ForEach(VideoDisplayMode.allCases) { mode in Text(mode.rawValue).tag(mode.rawValue) }
+                }
+            } label: {
+                Label(compatibilityPlayer ? "Original player" : "Size: " + displayMode.rawValue, systemImage: "aspectratio")
+            }.disabled(compatibilityPlayer)
+            Spacer()
+            if !compatibilityPlayer {
+                Text(displayMode == .fill ? "Crops edges" : (displayMode == .fit ? "Keeps proportions" : "Stretches picture"))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(.horizontal)
+    }
     @ObservedObject private var favorites = Favorites.shared
     @Environment(\.dismiss) private var dismiss
     private var isFavorite: Bool {
@@ -386,14 +409,15 @@ struct PlaybackView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     if !fullscreen {
-                        VideoPlayer(player: playback.player)
+                        videoView
                             .frame(height: 300)
                     } else { Color.black.frame(height: 300) }
                     playbackActions
+                    displayControls
                     Text(playback.state).font(.headline)
                     if !playback.diagnostic.isEmpty { Text(playback.diagnostic).font(.footnote).padding(.horizontal) }
                     Button("Retry from beginning") { playback.retry() }.buttonStyle(.borderedProminent)
-                    DisclosureGroup("Playback details • 0.3.2") {
+                    DisclosureGroup("Playback details • 0.3.3") {
                         Text(playback.eventLog.joined(separator: "\n"))
                             .font(.caption.monospaced()).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -426,7 +450,8 @@ struct PlaybackView: View {
         .fullScreenCover(isPresented: $fullscreen) {
             VStack {
                 HStack { Spacer(); Button("Done") { fullscreen = false } }.padding(.horizontal)
-                VideoPlayer(player: playback.player)
+                videoView
+                displayControls
                 playbackActions.padding(.bottom)
             }.background(.black).preferredColorScheme(.dark)
         }

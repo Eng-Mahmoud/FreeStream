@@ -8,6 +8,7 @@ settings:
     SWIFT_VERSION: '5.0'
     TARGETED_DEVICE_FAMILY: '1,2'
     CODE_SIGNING_ALLOWED: NO
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 targets:
   FreeStream:
     type: application
@@ -22,8 +23,8 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: MahmoudTV
-        CFBundleShortVersionString: '0.3.2'
-        CFBundleVersion: '6'
+        CFBundleShortVersionString: '0.3.3'
+        CFBundleVersion: '7'
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]

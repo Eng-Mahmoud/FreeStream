@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var remember = !Vault.load().username.isEmpty
     @State private var busy = false
     @State private var message = ""
+    @AppStorage("MahmoudTV.compatibilityPlayer") private var compatibilityPlayer = false
     var body: some View {
         NavigationStack {
             Form {
@@ -25,6 +26,10 @@ struct SettingsView: View {
                     }
                     Button(busy ? "Loading…" : "Load all content") { Task { await load() } }.disabled(busy)
                     if !message.isEmpty { Text(message).font(.footnote).foregroundStyle(.orange) }
+                }
+                Section("Video display") {
+                    Toggle("Compatibility player", isOn: $compatibilityPlayer)
+                    Text("Use the original 0.3.2 video view if display problems occur. Custom size controls are disabled in this mode.").font(.footnote)
                 }
                 Section("CarPlay") {
                     Toggle("Save catalog for access from car", isOn: $library.rememberCatalog)
