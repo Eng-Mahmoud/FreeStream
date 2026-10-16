@@ -5,7 +5,7 @@ final class StreamLibrary: ObservableObject {
     static let shared = StreamLibrary()
     @Published private(set) var items: [Channel] = []
     @Published private(set) var series: [Series] = []
-    @Published var carStatus = "CarPlay disconnected. Authorized signing is required for the car app."
+    @Published var carStatus = "CarPlay has not connected this launch. Open CarPlay connection test in Settings for details."
     @Published var rememberCatalog: Bool {
         didSet { UserDefaults.standard.set(rememberCatalog, forKey: "saveCatalog"); persist() }
     }

@@ -34,7 +34,12 @@ struct SettingsView: View {
                 Section("CarPlay") {
                     Toggle("Save catalog for access from car", isOn: $library.rememberCatalog)
                     Text(library.carStatus).font(.footnote)
+                    NavigationLink("CarPlay connection test") { CarPlayDiagnosticsView() }
                     Text("Saved catalogs include stream credentials and are stored in this device’s Keychain. Series episode lists require a network connection. Video availability is controlled by CarPlay.").font(.footnote)
+                }
+                Section("About") {
+                    LabeledContent("App", value: "MahmoudTV")
+                    LabeledContent("Version", value: CarPlayDiagnostics.shared.version)
                 }
                 Section {
                     Button("Forget login and catalog", role: .destructive) { Vault.clear(); library.clear(); Favorites.shared.clear(); credentials = Credentials(); remember = false; Playback.shared.stop() }.disabled(busy)

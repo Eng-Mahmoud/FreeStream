@@ -417,7 +417,7 @@ struct PlaybackView: View {
                     Text(playback.state).font(.headline)
                     if !playback.diagnostic.isEmpty { Text(playback.diagnostic).font(.footnote).padding(.horizontal) }
                     Button("Retry from beginning") { playback.retry() }.buttonStyle(.borderedProminent)
-                    DisclosureGroup("Playback details • 0.3.3") {
+                    DisclosureGroup("Playback details • 0.3.4") {
                         Text(playback.eventLog.joined(separator: "\n"))
                             .font(.caption.monospaced()).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)

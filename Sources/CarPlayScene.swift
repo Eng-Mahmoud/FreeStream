@@ -3,10 +3,17 @@ import CarPlay
 import Combine
 import AVFoundation
 
+@MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        CarPlayDiagnostics.shared.appLaunched()
+        return true
+    }
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         if session.role == .carTemplateApplication {
+            CarPlayDiagnostics.shared.sceneRequested()
             let config = UISceneConfiguration(name: "CarPlay", sessionRole: session.role)
             config.sceneClass = CPTemplateApplicationScene.self
             config.delegateClass = CarPlaySceneDelegate.self
@@ -17,6 +24,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 }
 
 @MainActor
+@objc(MahmoudTVCarPlaySceneDelegate)
 final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPSearchTemplateDelegate, CPSessionConfigurationDelegate {
     private var controller: CPInterfaceController?
     private var session: CPSessionConfiguration?
@@ -28,12 +36,22 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
                                   didConnect interfaceController: CPInterfaceController) {
         controller = interfaceController
         session = CPSessionConfiguration(delegate: self)
+        supportsVideo = false
+        var vehicleVideo: Bool?
         #if FREESTREAM_VIDEO_SDK
-        if #available(iOS 27.0, *) { supportsVideo = session?.supportsVideoPlayback == true }
+        if #available(iOS 27.0, *), CarPlayDiagnostics.shared.mode != "audio-icon-test" {
+            supportsVideo = session?.supportsVideoPlayback == true
+            vehicleVideo = supportsVideo
+        }
         #endif
-        StreamLibrary.shared.carStatus = supportsVideo
-            ? "CarPlay connected • video supported; availability follows vehicle policy."
-            : "CarPlay connected • audio mode. Video capability unavailable or SDK support absent."
+        CarPlayDiagnostics.shared.didConnect(supportsVideo: vehicleVideo)
+        if CarPlayDiagnostics.shared.mode == "audio-icon-test" {
+            StreamLibrary.shared.carStatus = "CarPlay connected • audio-only icon test."
+        } else {
+            StreamLibrary.shared.carStatus = supportsVideo
+                ? "CarPlay connected • video supported; availability follows vehicle policy."
+                : "CarPlay connected • audio mode. Video capability unavailable or SDK support absent."
+        }
         showRoot()
         StreamLibrary.shared.$items.combineLatest(StreamLibrary.shared.$series)
             .dropFirst().sink { [weak self] _, _ in self?.showRoot() }.store(in: &subscriptions)
@@ -41,8 +59,21 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     func templateApplicationScene(_ templateApplicationScene: CPTemplateApplicationScene,
                                   didDisconnectInterfaceController interfaceController: CPInterfaceController) {
         subscriptions.removeAll(); controller = nil; session = nil; searchEntries = []
+        CarPlayDiagnostics.shared.didDisconnect()
         StreamLibrary.shared.carStatus = "CarPlay disconnected."
         // Playback belongs to the app, not to the lifetime of either screen.
+    }
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        CarPlayDiagnostics.shared.record("CarPlay scene became active.")
+    }
+    func sceneWillResignActive(_ scene: UIScene) {
+        CarPlayDiagnostics.shared.record("CarPlay scene will resign active.")
+    }
+    func sceneWillEnterForeground(_ scene: UIScene) {
+        CarPlayDiagnostics.shared.record("CarPlay scene will enter foreground.")
+    }
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        CarPlayDiagnostics.shared.record("CarPlay scene entered background.")
     }
     private func row(_ title: String, detail: String = "", action: @escaping () -> Void) -> CPListItem {
         let item = CPListItem(text: title, detailText: detail)
@@ -52,6 +83,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     private func showRoot() {
         let library = StreamLibrary.shared
         let rows = [
+            row("Connection test", detail: "Check the car interface without playing media") { [weak self] in self?.showConnectionTest() },
             row("All content", detail: "Live TV, movies and series") { [weak self] in self?.showAll() },
             row("Live TV", detail: "\(library.items.filter(\.live).count) channels") { [weak self] in self?.showChannels(library.items.filter(\.live), title: "Live TV") },
             row("Movies", detail: "\(library.items.filter { !$0.live }.count) movies") { [weak self] in self?.showChannels(library.items.filter { !$0.live }, title: "Movies") },
@@ -68,7 +100,23 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         ]
         let section = CPListSection(items: rows, header: library.items.isEmpty && library.series.isEmpty
             ? "Load a catalog on iPhone first" : (supportsVideo ? "Video supported when available" : "Audio mode"), sectionIndexTitle: nil)
-        controller?.setRootTemplate(CPListTemplate(title: "MahmoudTV", sections: [section]), animated: false, completion: nil)
+        controller?.setRootTemplate(CPListTemplate(title: "MahmoudTV", sections: [section]), animated: false) { success, error in
+            let code = (error as NSError?)?.code
+            Task { @MainActor in
+                if success { CarPlayDiagnostics.shared.record("CarPlay root menu accepted.") }
+                else { CarPlayDiagnostics.shared.record("CarPlay root menu rejected; error code: \(code.map { String($0) } ?? "unknown").") }
+            }
+        }
+    }
+    private func showConnectionTest() {
+        CarPlayDiagnostics.shared.record("Connection test opened on car.")
+        let rows = [
+            row("CarPlay icon opened", detail: "The car interface is connected.") {},
+            row("MahmoudTV", detail: CarPlayDiagnostics.shared.version) {},
+            row("Test mode", detail: CarPlayDiagnostics.shared.mode) {},
+            row("Browse your library", detail: "Use Back for live TV, movies and series.") {}
+        ]
+        controller?.pushTemplate(CPListTemplate(title: "Connection test", sections: [CPListSection(items: rows)]), animated: true, completion: nil)
     }
     private func channelRow(_ channel: Channel, queue: [Channel]? = nil, series: Series? = nil) -> CPListItem {
         let item = row(channel.name, detail: channel.group) { [weak self] in
@@ -80,7 +128,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         }
         item.isPlaying = Playback.shared.channel?.id == channel.id
         #if FREESTREAM_VIDEO_SDK
-        if #available(iOS 27.0, *) {
+        if #available(iOS 27.0, *), CarPlayDiagnostics.shared.mode != "audio-icon-test" {
             item.playbackConfiguration = CPPlaybackConfiguration(
                 preferredPresentation: supportsVideo ? .video : .audio,
                 playbackAction: .play, elapsedTime: .zero, duration: .zero)

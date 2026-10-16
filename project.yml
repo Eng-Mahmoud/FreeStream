@@ -23,8 +23,9 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: MahmoudTV
-        CFBundleShortVersionString: '0.3.3'
-        CFBundleVersion: '7'
+        CFBundleShortVersionString: '0.3.4'
+        CFBundleVersion: '8'
+        MahmoudTVCarPlayTestMode: standard
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
@@ -37,7 +38,7 @@ targets:
             CPTemplateApplicationSceneSessionRoleApplication:
               - UISceneClassName: CPTemplateApplicationScene
                 UISceneConfigurationName: CarPlay
-                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
+                UISceneDelegateClassName: MahmoudTVCarPlaySceneDelegate
         NSLocalNetworkUsageDescription: Discover and connect to local AirPlay receivers.
 schemes:
   FreeStream:
